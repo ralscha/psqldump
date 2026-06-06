@@ -29,11 +29,11 @@ func BuildImage(ctx context.Context, cfg BuildConfig) error {
 		cfg.User = "postgres"
 	}
 
-	cli, err := client.New(client.FromEnv, client.WithAPIVersionNegotiation())
+	cli, err := client.New(client.FromEnv)
 	if err != nil {
 		return fmt.Errorf("create docker client: %w", err)
 	}
-	defer cli.Close()
+	defer func() { _ = cli.Close() }()
 
 	dumpData, err := os.ReadFile(cfg.DumpPath)
 	if err != nil {
@@ -71,13 +71,13 @@ COPY %s /docker-entrypoint-initdb.d/
 	if err != nil {
 		return fmt.Errorf("image build: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	decodedOutput := make([]byte, 4096)
 	for {
 		n, err := resp.Body.Read(decodedOutput)
 		if n > 0 {
-			os.Stdout.Write(decodedOutput[:n])
+			_, _ = os.Stdout.Write(decodedOutput[:n])
 		}
 		if err == io.EOF {
 			break
@@ -101,11 +101,11 @@ func PullPostgres(ctx context.Context, version string) error {
 		version = "16"
 	}
 
-	cli, err := client.New(client.FromEnv, client.WithAPIVersionNegotiation())
+	cli, err := client.New(client.FromEnv)
 	if err != nil {
 		return fmt.Errorf("create docker client: %w", err)
 	}
-	defer cli.Close()
+	defer func() { _ = cli.Close() }()
 
 	ref := fmt.Sprintf("postgres:%s", version)
 
@@ -120,9 +120,9 @@ func PullPostgres(ctx context.Context, version string) error {
 	if err != nil {
 		return fmt.Errorf("pull image: %w", err)
 	}
-	defer resp.Close()
+	defer func() { _ = resp.Close() }()
 
-	io.Copy(io.Discard, resp)
+	_, _ = io.Copy(io.Discard, resp)
 	fmt.Printf("Pulled %s\n", ref)
 	return nil
 }

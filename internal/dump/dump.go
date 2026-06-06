@@ -99,13 +99,13 @@ func Run(cfg Config) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("create dump file: %w", err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	cmd.Stdout = f
 	cmd.Stderr = os.Stderr
 
 	if err := cmd.Run(); err != nil {
-		os.Remove(dumpPath)
+		_ = os.Remove(dumpPath)
 		return "", fmt.Errorf("docker pg_dump failed: %w", err)
 	}
 
