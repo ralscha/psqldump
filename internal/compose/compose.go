@@ -29,7 +29,7 @@ func Generate(cfg Config) (string, error) {
 		cfg.User = "postgres"
 	}
 
-	if err := os.MkdirAll(cfg.OutDir, 0o755); err != nil {
+	if err := os.MkdirAll(cfg.OutDir, 0o750); err != nil {
 		return "", fmt.Errorf("create output dir: %w", err)
 	}
 
@@ -52,7 +52,7 @@ volumes:
   pgdata:
 `, cfg.ImageName, quoteYAMLString(cfg.DBName), quoteYAMLString(cfg.User), quoteYAMLString(cfg.Password), cfg.ExternalPort)
 
-	if err := os.WriteFile(composePath, []byte(strings.TrimSpace(content)+"\n"), 0o644); err != nil {
+	if err := os.WriteFile(composePath, []byte(strings.TrimSpace(content)+"\n"), 0o600); err != nil {
 		return "", fmt.Errorf("write compose file: %w", err)
 	}
 

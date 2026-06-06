@@ -26,6 +26,7 @@ func TestGenerateWritesExternalPortAndQuotedEnvironment(t *testing.T) {
 		t.Fatalf("composePath = %q, want docker-compose.yml in temp dir", composePath)
 	}
 
+	// #nosec G304 -- composePath is constructed from t.TempDir() and a fixed filename
 	contentBytes, err := os.ReadFile(composePath)
 	if err != nil {
 		t.Fatalf("read compose file: %v", err)

@@ -36,6 +36,7 @@ func ServerVersion(cfg Config) (string, error) {
 		"-c", "SELECT current_setting('server_version_num')",
 	}
 
+	// #nosec G204 -- args are built from config values; this is a Docker CLI wrapper
 	cmd := exec.Command("docker", args...)
 	var out bytes.Buffer
 	cmd.Stdout = &out
@@ -61,7 +62,7 @@ func ServerVersion(cfg Config) (string, error) {
 }
 
 func Run(cfg Config) (string, error) {
-	if err := os.MkdirAll(cfg.OutDir, 0o755); err != nil {
+	if err := os.MkdirAll(cfg.OutDir, 0o750); err != nil {
 		return "", fmt.Errorf("create output dir: %w", err)
 	}
 
@@ -93,8 +94,10 @@ func Run(cfg Config) (string, error) {
 
 	fmt.Printf("Dumping %s@%s:%d/%s -> %s (via %s)\n", cfg.User, cfg.Host, cfg.Port, cfg.DBName, dumpPath, clientImage)
 
+	// #nosec G204 -- args are built from config values; this is a Docker CLI wrapper
 	cmd := exec.Command("docker", args...)
 
+	// #nosec G304 -- dumpPath is constructed from cfg.OutDir and cfg.DBName
 	f, err := os.Create(dumpPath)
 	if err != nil {
 		return "", fmt.Errorf("create dump file: %w", err)
