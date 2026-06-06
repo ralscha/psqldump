@@ -1,0 +1,24 @@
+version: "3"
+
+tasks:
+  fmt:
+    desc: Format Go source files
+    cmds:
+      - go fix ./...
+      - go fmt ./...
+
+  tidy:
+    desc: Tidy Go modules
+    cmds:
+      - go mod tidy
+
+  build:
+    desc: Build the psqldump binary
+    deps: [tidy]
+    cmds:
+      - go build -o psqldump{{exeExt}} ./cmd/psqldump
+
+  test:
+    desc: Run tests with verbose output
+    cmds:
+      - go test -v ./...
