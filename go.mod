@@ -1,6 +1,6 @@
 module psqldump
 
-go 1.26.5
+go 1.26.6
 
 require github.com/moby/moby/client v0.5.1
 
