@@ -34,6 +34,10 @@ func TestGenerateWritesExternalPortAndQuotedEnvironment(t *testing.T) {
 	content := string(contentBytes)
 
 	for _, want := range []string{
+		`build:`,
+		`context: .`,
+		`dockerfile: "psqldump.Dockerfile"`,
+		`image: "psqldump-app:latest"`,
 		`POSTGRES_DB: "app-db"`,
 		`POSTGRES_USER: "read only"`,
 		`POSTGRES_PASSWORD: "p@ss:word"`,

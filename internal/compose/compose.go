@@ -10,6 +10,7 @@ import (
 
 type Config struct {
 	ImageName    string
+	Dockerfile   string
 	DBName       string
 	User         string
 	Password     string
@@ -28,6 +29,12 @@ func Generate(cfg Config) (string, error) {
 	if cfg.User == "" {
 		cfg.User = "postgres"
 	}
+	if cfg.OutDir == "" {
+		cfg.OutDir = "."
+	}
+	if cfg.Dockerfile == "" {
+		cfg.Dockerfile = "psqldump.Dockerfile"
+	}
 
 	if err := os.MkdirAll(cfg.OutDir, 0o750); err != nil {
 		return "", fmt.Errorf("create output dir: %w", err)
@@ -37,6 +44,9 @@ func Generate(cfg Config) (string, error) {
 
 	content := fmt.Sprintf(`services:
   postgres:
+    build:
+      context: .
+      dockerfile: %s
     image: %s
     restart: unless-stopped
     environment:
@@ -50,10 +60,13 @@ func Generate(cfg Config) (string, error) {
 
 volumes:
   pgdata:
-`, cfg.ImageName, quoteYAMLString(cfg.DBName), quoteYAMLString(cfg.User), quoteYAMLString(cfg.Password), cfg.ExternalPort)
+`, quoteYAMLString(cfg.Dockerfile), quoteYAMLString(cfg.ImageName), quoteYAMLString(cfg.DBName), quoteYAMLString(cfg.User), quoteYAMLString(cfg.Password), cfg.ExternalPort)
 
 	if err := os.WriteFile(composePath, []byte(strings.TrimSpace(content)+"\n"), 0o600); err != nil {
 		return "", fmt.Errorf("write compose file: %w", err)
+	}
+	if err := os.Chmod(composePath, 0o600); err != nil {
+		return "", fmt.Errorf("set compose file permissions: %w", err)
 	}
 
 	fmt.Printf("Generated %s\n", composePath)

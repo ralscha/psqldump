@@ -2,12 +2,14 @@ package dump
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
+
+	"psqldump/internal/postgres"
 )
 
 const pgClientImage = "postgres:alpine"
@@ -23,9 +25,13 @@ type Config struct {
 }
 
 func ServerVersion(cfg Config) (string, error) {
+	return ServerVersionContext(context.Background(), cfg)
+}
+
+func ServerVersionContext(ctx context.Context, cfg Config) (string, error) {
 	args := []string{
 		"run", "--rm",
-		"-e", "PGPASSWORD=" + cfg.Password,
+		"-e", "PGPASSWORD",
 		pgClientImage,
 		"psql",
 		"-h", cfg.Host,
@@ -37,7 +43,8 @@ func ServerVersion(cfg Config) (string, error) {
 	}
 
 	// #nosec G204 -- args are built from config values; this is a Docker CLI wrapper
-	cmd := exec.Command("docker", args...)
+	cmd := exec.CommandContext(ctx, "docker", args...)
+	cmd.Env = environmentWithPassword(cfg.Password)
 	var out bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = os.Stderr
@@ -51,37 +58,50 @@ func ServerVersion(cfg Config) (string, error) {
 		return "", fmt.Errorf("empty version response from server")
 	}
 
-	verNum, err := strconv.Atoi(raw)
+	major, err := postgres.VersionFromServerNumber(raw)
 	if err != nil {
-		return "", fmt.Errorf("parse version %q: %w", raw, err)
+		return "", err
 	}
 
-	major := strconv.Itoa(verNum / 10000)
 	fmt.Printf("Detected PostgreSQL server version: %s (raw: %s)\n", major, raw)
 	return major, nil
 }
 
 func Run(cfg Config) (string, error) {
+	return RunContext(context.Background(), cfg)
+}
+
+func RunContext(ctx context.Context, cfg Config) (string, error) {
+	if cfg.OutDir == "" {
+		cfg.OutDir = "."
+	}
 	if err := os.MkdirAll(cfg.OutDir, 0o750); err != nil {
 		return "", fmt.Errorf("create output dir: %w", err)
 	}
 
 	pgVer := cfg.PgVersion
 	if pgVer == "" {
-		v, err := ServerVersion(cfg)
+		v, err := ServerVersionContext(ctx, cfg)
 		if err != nil {
 			return "", fmt.Errorf("auto-detect pg version for dump: %w", err)
 		}
 		pgVer = v
 	}
+	if err := postgres.ValidateVersion(pgVer); err != nil {
+		return "", err
+	}
 
 	clientImage := fmt.Sprintf("postgres:%s-alpine", pgVer)
 
-	dumpPath := filepath.Join(cfg.OutDir, cfg.DBName+".sql")
+	dumpFileName := cfg.DBName + ".sql"
+	if !filepath.IsLocal(dumpFileName) || filepath.Base(dumpFileName) != dumpFileName {
+		return "", fmt.Errorf("database name %q cannot be used as a portable dump filename", cfg.DBName)
+	}
+	dumpPath := filepath.Join(cfg.OutDir, dumpFileName)
 
 	args := []string{
 		"run", "--rm",
-		"-e", "PGPASSWORD=" + cfg.Password,
+		"-e", "PGPASSWORD",
 		clientImage,
 		"pg_dump",
 		"-h", cfg.Host,
@@ -95,7 +115,8 @@ func Run(cfg Config) (string, error) {
 	fmt.Printf("Dumping %s@%s:%d/%s -> %s (via %s)\n", cfg.User, cfg.Host, cfg.Port, cfg.DBName, dumpPath, clientImage)
 
 	// #nosec G204 -- args are built from config values; this is a Docker CLI wrapper
-	cmd := exec.Command("docker", args...)
+	cmd := exec.CommandContext(ctx, "docker", args...)
+	cmd.Env = environmentWithPassword(cfg.Password)
 
 	// #nosec G304 -- dumpPath is constructed from cfg.OutDir and cfg.DBName
 	f, err := os.Create(dumpPath)
@@ -114,6 +135,19 @@ func Run(cfg Config) (string, error) {
 
 	fmt.Printf("Dump complete: %s (%d bytes)\n", dumpPath, fileSize(dumpPath))
 	return dumpPath, nil
+}
+
+func environmentWithPassword(password string) []string {
+	environment := os.Environ()
+	result := make([]string, 0, len(environment)+1)
+	for _, entry := range environment {
+		name, _, found := strings.Cut(entry, "=")
+		if found && strings.EqualFold(name, "PGPASSWORD") {
+			continue
+		}
+		result = append(result, entry)
+	}
+	return append(result, "PGPASSWORD="+password)
 }
 
 func fileSize(path string) int64 {

@@ -8,13 +8,15 @@ Dump a remote PostgreSQL database and create a self-restoring Docker Compose set
 flowchart LR
     A[Remote PostgreSQL] -->|docker run pg_dump| B[dump.sql]
     B -->|Docker Go SDK| C[Custom Image<br/>postgres + dump.sql]
-    C --> D[docker-compose.yml]
-    D -->|docker compose up| E[Local PostgreSQL<br/>auto-restored]
+    B --> F[Portable Dockerfile]
+    C --> D[docker-compose.yml<br/>image + build recipe]
+    F --> D
+    D -->|docker compose up --build| E[Local PostgreSQL<br/>auto-restored]
 ```
 
 1. **Dump**: runs `pg_dump` inside a version-matched `postgres:<major>-alpine` container.
-2. **Build**: uses the Docker Go SDK to build a PostgreSQL image with the dump copied into `/docker-entrypoint-initdb.d/`.
-3. **Compose**: generates a `docker-compose.yml` that starts the image and auto-restores the database on first startup.
+2. **Build**: uses the Docker Go SDK to build a PostgreSQL image with the dump copied into `/docker-entrypoint-initdb.d/`. It also writes the same build recipe to `psqldump.Dockerfile` and a narrow build-context ignore file.
+3. **Compose**: generates a `docker-compose.yml` that starts the image and auto-restores the database on first startup. The relative build recipe lets Compose recreate the image on another computer.
 
 ## Prerequisites
 
@@ -34,32 +36,44 @@ psqldump all \
   --host my-db.example.com \
   --dbname mydatabase \
   --user postgres \
-  --password s3cret \
   --out ./out
 ```
+
+Set `PGPASSWORD` in the environment before running the command. `--password` is also supported, but environment variables avoid saving the password in shell history.
 
 This auto-detects the remote PostgreSQL version, dumps the database, builds a Docker image, and generates a `docker-compose.yml`.
 
 ### Step by step
 
 ```bash
-# 1. Dump only
-psqldump dump -H my-db.example.com -d mydatabase -U postgres -W s3cret -o ./out
+# 1. Dump only (with PGPASSWORD set in the environment)
+psqldump dump -H my-db.example.com -d mydatabase -U postgres -o ./out
 
-# 2. Build Docker image from ./out/mydatabase.sql
-psqldump build -H my-db.example.com -d mydatabase -U postgres -W s3cret -o ./out
+# 2. Build the image and write ./out/psqldump.Dockerfile
+psqldump build -H my-db.example.com -d mydatabase -U postgres -o ./out
 
 # 3. Generate compose file
-psqldump compose -d mydatabase -U postgres -W s3cret -o ./out
+psqldump compose -d mydatabase -U postgres -o ./out
 ```
 
 ### Start the restored database
 
 ```bash
-docker compose -f ./out/docker-compose.yml up -d
+docker compose -f ./out/docker-compose.yml up -d --build
 ```
 
 The database will be available on the external port from the generated compose file.
+
+### Move the result to another computer
+
+Copy the complete output directory, including the SQL dump, `psqldump.Dockerfile`, `psqldump.Dockerfile.dockerignore`, and `docker-compose.yml`. On the destination computer, run:
+
+```bash
+cd out
+docker compose up -d --build
+```
+
+Compose rebuilds the custom image from the files in that directory, so it does not depend on the source computer's local Docker image. The destination needs network access to pull the versioned official `postgres` base image if it is not already cached.
 
 ## Flags
 
@@ -83,8 +97,8 @@ If `--external-port` is omitted, the compose file uses the value from `--port`. 
 | Command | Description |
 |---|---|
 | `dump` | Dump the remote database to a `.sql` file |
-| `build` | Build a Docker image with the dump baked in |
-| `compose` | Generate a `docker-compose.yml` |
+| `build` | Build a Docker image and write its portable Dockerfile |
+| `compose` | Generate a portable `docker-compose.yml` |
 | `all` | Run dump, build, and compose in sequence |
 
 

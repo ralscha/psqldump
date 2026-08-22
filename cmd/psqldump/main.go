@@ -2,16 +2,20 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"path/filepath"
+	"strings"
 
 	"psqldump/internal/compose"
 	"psqldump/internal/docker"
 	"psqldump/internal/dump"
+	"psqldump/internal/postgres"
 )
 
 const defaultPostgresPort = 5432
@@ -35,6 +39,12 @@ func main() {
 }
 
 func run(args []string) error {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer stop()
+	return runContext(ctx, args)
+}
+
+func runContext(ctx context.Context, args []string) error {
 	if len(args) == 0 {
 		printUsage(os.Stderr)
 		return errors.New("missing command")
@@ -56,13 +66,13 @@ func run(args []string) error {
 
 	switch command {
 	case "dump":
-		return runDump(opts)
+		return runDump(ctx, opts)
 	case "build":
-		return runBuild(opts)
+		return runBuild(ctx, opts)
 	case "compose":
 		return runCompose(opts)
 	case "all":
-		return runAll(opts)
+		return runAll(ctx, opts)
 	default:
 		printUsage(os.Stderr)
 		return fmt.Errorf("unknown command %q", command)
@@ -96,6 +106,9 @@ func parseOptions(command string, args []string) (options, error) {
 	if err := fs.Parse(args); err != nil {
 		return opts, err
 	}
+	if fs.NArg() != 0 {
+		return opts, fmt.Errorf("unexpected arguments: %s", strings.Join(fs.Args(), " "))
+	}
 	externalPortSet := false
 	fs.Visit(func(f *flag.Flag) {
 		if f.Name == "external-port" || f.Name == "E" {
@@ -108,11 +121,20 @@ func parseOptions(command string, args []string) (options, error) {
 	if opts.dbName == "" {
 		return opts, errors.New("missing required flag: -d/--dbname")
 	}
+	dumpFileName := opts.dbName + ".sql"
+	if !filepath.IsLocal(dumpFileName) || filepath.Base(dumpFileName) != dumpFileName {
+		return opts, fmt.Errorf("database name %q cannot be used as a portable dump filename", opts.dbName)
+	}
 	if opts.port <= 0 || opts.port > 65535 {
 		return opts, fmt.Errorf("invalid PostgreSQL port: %d", opts.port)
 	}
 	if opts.externalPort <= 0 || opts.externalPort > 65535 {
 		return opts, fmt.Errorf("invalid external port: %d", opts.externalPort)
+	}
+	if opts.pgVer != "" {
+		if err := postgres.ValidateVersion(opts.pgVer); err != nil {
+			return opts, err
+		}
 	}
 	return opts, nil
 }
@@ -127,8 +149,8 @@ func addIntFlag(fs *flag.FlagSet, target *int, long, short string, value int, us
 	fs.IntVar(target, short, value, usage)
 }
 
-func runDump(opts options) error {
-	dumpPath, err := dump.Run(dump.Config{
+func runDump(ctx context.Context, opts options) error {
+	dumpPath, err := dump.RunContext(ctx, dump.Config{
 		Host:      opts.host,
 		Port:      opts.port,
 		User:      opts.user,
@@ -144,16 +166,17 @@ func runDump(opts options) error {
 	return nil
 }
 
-func runBuild(opts options) error {
-	ctx := context.Background()
-
+func runBuild(ctx context.Context, opts options) error {
 	dumpPath := filepath.Join(opts.outDir, opts.dbName+".sql")
-	if _, err := os.Stat(dumpPath); os.IsNotExist(err) {
-		return fmt.Errorf("dump file not found: %s - run 'psqldump dump' first", dumpPath)
+	if _, err := os.Stat(dumpPath); err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("dump file not found: %s - run 'psqldump dump' first", dumpPath)
+		}
+		return fmt.Errorf("inspect dump file %s: %w", dumpPath, err)
 	}
 
 	if opts.pgVer == "" {
-		v, err := dump.ServerVersion(dump.Config{
+		v, err := dump.ServerVersionContext(ctx, dump.Config{
 			Host:     opts.host,
 			Port:     opts.port,
 			User:     opts.user,
@@ -167,7 +190,7 @@ func runBuild(opts options) error {
 		opts.pgVer = v
 	}
 
-	imageTag := fmt.Sprintf("psqldump-%s:latest", opts.dbName)
+	imageTag := imageTagForDatabase(opts.dbName)
 
 	if err := docker.PullPostgres(ctx, opts.pgVer); err != nil {
 		return fmt.Errorf("pull postgres: %w", err)
@@ -175,9 +198,6 @@ func runBuild(opts options) error {
 
 	if err := docker.BuildImage(ctx, docker.BuildConfig{
 		DumpPath:  dumpPath,
-		DBName:    opts.dbName,
-		User:      opts.user,
-		Password:  opts.password,
 		ImageTag:  imageTag,
 		PgVersion: opts.pgVer,
 	}); err != nil {
@@ -189,9 +209,10 @@ func runBuild(opts options) error {
 }
 
 func runCompose(opts options) error {
-	imageTag := fmt.Sprintf("psqldump-%s:latest", opts.dbName)
+	imageTag := imageTagForDatabase(opts.dbName)
 	composePath, err := compose.Generate(compose.Config{
 		ImageName:    imageTag,
+		Dockerfile:   docker.DockerfileName,
 		DBName:       opts.dbName,
 		User:         opts.user,
 		Password:     opts.password,
@@ -202,13 +223,11 @@ func runCompose(opts options) error {
 		return err
 	}
 	fmt.Printf("Compose file: %s\n", composePath)
-	fmt.Println("\nRun 'docker compose up -d' to start the restored database.")
+	fmt.Println("\nRun 'docker compose up -d --build' to start the restored database.")
 	return nil
 }
 
-func runAll(opts options) error {
-	ctx := context.Background()
-
+func runAll(ctx context.Context, opts options) error {
 	dumpCfg := dump.Config{
 		Host:     opts.host,
 		Port:     opts.port,
@@ -219,7 +238,7 @@ func runAll(opts options) error {
 	}
 
 	if opts.pgVer == "" {
-		v, err := dump.ServerVersion(dumpCfg)
+		v, err := dump.ServerVersionContext(ctx, dumpCfg)
 		if err != nil {
 			return fmt.Errorf("auto-detect pg version: %w", err)
 		}
@@ -227,20 +246,17 @@ func runAll(opts options) error {
 	}
 
 	dumpCfg.PgVersion = opts.pgVer
-	dumpPath, err := dump.Run(dumpCfg)
+	dumpPath, err := dump.RunContext(ctx, dumpCfg)
 	if err != nil {
 		return fmt.Errorf("dump: %w", err)
 	}
 
-	imageTag := fmt.Sprintf("psqldump-%s:latest", opts.dbName)
+	imageTag := imageTagForDatabase(opts.dbName)
 	if err := docker.PullPostgres(ctx, opts.pgVer); err != nil {
 		return fmt.Errorf("pull postgres: %w", err)
 	}
 	if err := docker.BuildImage(ctx, docker.BuildConfig{
 		DumpPath:  dumpPath,
-		DBName:    opts.dbName,
-		User:      opts.user,
-		Password:  opts.password,
 		ImageTag:  imageTag,
 		PgVersion: opts.pgVer,
 	}); err != nil {
@@ -249,6 +265,7 @@ func runAll(opts options) error {
 
 	composePath, err := compose.Generate(compose.Config{
 		ImageName:    imageTag,
+		Dockerfile:   docker.DockerfileName,
 		DBName:       opts.dbName,
 		User:         opts.user,
 		Password:     opts.password,
@@ -259,9 +276,49 @@ func runAll(opts options) error {
 		return fmt.Errorf("compose: %w", err)
 	}
 
-	fmt.Printf("\nAll done! Dump, image, and compose file at: %s\nRun 'docker compose -f %s up -d' to start.\n",
+	fmt.Printf("\nAll done! Portable dump, build recipe, and compose file are at: %s\nRun 'docker compose -f %s up -d --build' to start.\n",
 		opts.outDir, composePath)
 	return nil
+}
+
+func imageTagForDatabase(dbName string) string {
+	lowerName := strings.ToLower(dbName)
+	var slug strings.Builder
+	var pendingSeparator byte
+
+	for _, char := range lowerName {
+		if (char >= 'a' && char <= 'z') || (char >= '0' && char <= '9') {
+			if pendingSeparator != 0 && slug.Len() > 0 {
+				slug.WriteByte(pendingSeparator)
+			}
+			pendingSeparator = 0
+			slug.WriteRune(char)
+			continue
+		}
+
+		separator := byte('-')
+		if char == '-' || char == '_' || char == '.' {
+			separator = byte(char)
+		}
+		if pendingSeparator == 0 {
+			pendingSeparator = separator
+		} else {
+			pendingSeparator = '-'
+		}
+	}
+
+	normalized := slug.String()
+	if normalized == "" {
+		normalized = "database"
+	}
+	if len(normalized) > 160 {
+		normalized = strings.TrimRight(normalized[:160], "-_.")
+	}
+	if normalized != dbName {
+		hash := sha256.Sum256([]byte(dbName))
+		normalized = fmt.Sprintf("%s-%x", normalized, hash[:4])
+	}
+	return "psqldump-" + normalized + ":latest"
 }
 
 func printUsage(w io.Writer) {
