@@ -133,7 +133,10 @@ func dockerfileContent(version, dumpFileName string) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("encode Dockerfile COPY arguments: %w", err)
 	}
-	return fmt.Appendf(nil, "FROM postgres:%s\nCOPY %s\n", version, copyArgs), nil
+	// PostgreSQL's entrypoint drops privileges to the postgres user before it
+	// reads files in docker-entrypoint-initdb.d. The build context deliberately
+	// keeps the dump private (0600), so COPY must also transfer its ownership.
+	return fmt.Appendf(nil, "FROM postgres:%s\nCOPY --chown=postgres:postgres %s\n", version, copyArgs), nil
 }
 
 func writePortableBuildFiles(cfg BuildConfig) ([]byte, error) {

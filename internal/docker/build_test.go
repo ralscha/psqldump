@@ -28,7 +28,7 @@ func TestWritePortableBuildFilesAndStreamContext(t *testing.T) {
 	}
 
 	wantDockerfile := "FROM postgres:16\n" +
-		"COPY [\"app database.sql\",\"/docker-entrypoint-initdb.d/10-psqldump.sql\"]\n"
+		"COPY --chown=postgres:postgres [\"app database.sql\",\"/docker-entrypoint-initdb.d/10-psqldump.sql\"]\n"
 	if string(dockerfile) != wantDockerfile {
 		t.Fatalf("Dockerfile = %q, want %q", dockerfile, wantDockerfile)
 	}
