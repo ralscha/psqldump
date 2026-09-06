@@ -14,6 +14,7 @@ import (
 	"github.com/moby/moby/client"
 	"github.com/moby/moby/client/pkg/jsonmessage"
 
+	"psqldump/internal/fileutil"
 	"psqldump/internal/postgres"
 )
 
@@ -47,7 +48,7 @@ func BuildImage(ctx context.Context, cfg BuildConfig) error {
 		return err
 	}
 
-	cli, err := client.New(client.FromEnv)
+	cli, err := newDockerClient()
 	if err != nil {
 		return fmt.Errorf("create docker client: %w", err)
 	}
@@ -95,7 +96,7 @@ func PullPostgres(ctx context.Context, version string) error {
 		return err
 	}
 
-	cli, err := client.New(client.FromEnv)
+	cli, err := newDockerClient()
 	if err != nil {
 		return fmt.Errorf("create docker client: %w", err)
 	}
@@ -123,6 +124,10 @@ func PullPostgres(ctx context.Context, version string) error {
 
 	fmt.Printf("Pulled %s\n", ref)
 	return nil
+}
+
+func newDockerClient() (*client.Client, error) {
+	return client.New(client.FromEnv, client.WithAPIVersionNegotiation())
 }
 
 func dockerfileContent(version, dumpFileName string) ([]byte, error) {
@@ -156,13 +161,11 @@ func writePortableBuildFiles(cfg BuildConfig) ([]byte, error) {
 
 	outDir := filepath.Dir(cfg.DumpPath)
 	path := filepath.Join(outDir, DockerfileName)
-	// #nosec G306 -- the generated Dockerfile contains no credentials
-	if err := os.WriteFile(path, dockerfile, 0o644); err != nil {
+	if err := fileutil.WriteFileAtomic(path, dockerfile, 0o644); err != nil {
 		return nil, fmt.Errorf("write portable Dockerfile: %w", err)
 	}
 	ignorePath := filepath.Join(outDir, DockerignoreName)
-	// #nosec G306 -- the generated ignore file contains no credentials
-	if err := os.WriteFile(ignorePath, []byte(dockerignoreContent), 0o644); err != nil {
+	if err := fileutil.WriteFileAtomic(ignorePath, []byte(dockerignoreContent), 0o644); err != nil {
 		return nil, fmt.Errorf("write portable Docker ignore file: %w", err)
 	}
 	return dockerfile, nil

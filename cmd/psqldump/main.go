@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"crypto/sha256"
 	"errors"
 	"flag"
 	"fmt"
@@ -12,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"psqldump/internal/artifact"
 	"psqldump/internal/compose"
 	"psqldump/internal/docker"
 	"psqldump/internal/dump"
@@ -20,11 +20,14 @@ import (
 
 const defaultPostgresPort = 5432
 
+var version = "dev"
+
 type options struct {
 	host         string
 	port         int
 	user         string
 	password     string
+	targetPass   string
 	dbName       string
 	outDir       string
 	pgVer        string
@@ -55,6 +58,17 @@ func runContext(ctx context.Context, args []string) error {
 		printUsage(os.Stdout)
 		return nil
 	}
+	if command == "-v" || command == "--version" || command == "version" {
+		if len(args) != 1 {
+			return fmt.Errorf("unexpected arguments: %s", strings.Join(args[1:], " "))
+		}
+		fmt.Fprintf(os.Stdout, "psqldump %s\n", version)
+		return nil
+	}
+	if !isWorkflowCommand(command) {
+		printUsage(os.Stderr)
+		return fmt.Errorf("unknown command %q", command)
+	}
 
 	opts, err := parseOptions(command, args[1:])
 	if err != nil {
@@ -73,9 +87,16 @@ func runContext(ctx context.Context, args []string) error {
 		return runCompose(opts)
 	case "all":
 		return runAll(ctx, opts)
+	}
+	return nil
+}
+
+func isWorkflowCommand(command string) bool {
+	switch command {
+	case "dump", "build", "compose", "all":
+		return true
 	default:
-		printUsage(os.Stderr)
-		return fmt.Errorf("unknown command %q", command)
+		return false
 	}
 }
 
@@ -85,6 +106,7 @@ func parseOptions(command string, args []string) (options, error) {
 		port:         defaultPostgresPort,
 		user:         "postgres",
 		password:     os.Getenv("PGPASSWORD"),
+		targetPass:   os.Getenv("PSQLDUMP_TARGET_PASSWORD"),
 		outDir:       ".",
 		externalPort: defaultPostgresPort,
 	}
@@ -97,7 +119,8 @@ func parseOptions(command string, args []string) (options, error) {
 	addStringFlag(fs, &opts.host, "host", "H", opts.host, "PostgreSQL host")
 	addIntFlag(fs, &opts.port, "port", "P", opts.port, "PostgreSQL port")
 	addStringFlag(fs, &opts.user, "user", "U", opts.user, "PostgreSQL user")
-	addStringFlag(fs, &opts.password, "password", "W", opts.password, "PostgreSQL password (or set PGPASSWORD)")
+	addStringFlag(fs, &opts.password, "password", "W", opts.password, "Source PostgreSQL password (or set PGPASSWORD)")
+	fs.StringVar(&opts.targetPass, "target-password", opts.targetPass, "Password for the restored database (or set PSQLDUMP_TARGET_PASSWORD)")
 	addStringFlag(fs, &opts.dbName, "dbname", "d", "", "Database name (required)")
 	addStringFlag(fs, &opts.outDir, "out", "o", opts.outDir, "Output directory")
 	fs.StringVar(&opts.pgVer, "pg-version", "", "PostgreSQL major version (e.g. 16). Empty = auto-detect from server")
@@ -121,9 +144,11 @@ func parseOptions(command string, args []string) (options, error) {
 	if opts.dbName == "" {
 		return opts, errors.New("missing required flag: -d/--dbname")
 	}
-	dumpFileName := opts.dbName + ".sql"
-	if !filepath.IsLocal(dumpFileName) || filepath.Base(dumpFileName) != dumpFileName {
-		return opts, fmt.Errorf("database name %q cannot be used as a portable dump filename", opts.dbName)
+	if (command == "compose" || command == "all") && opts.targetPass == "" {
+		return opts, errors.New("missing required flag: --target-password (or set PSQLDUMP_TARGET_PASSWORD)")
+	}
+	if strings.ContainsRune(opts.dbName, '\x00') {
+		return opts, errors.New("database name cannot contain a null byte")
 	}
 	if opts.port <= 0 || opts.port > 65535 {
 		return opts, fmt.Errorf("invalid PostgreSQL port: %d", opts.port)
@@ -167,12 +192,16 @@ func runDump(ctx context.Context, opts options) error {
 }
 
 func runBuild(ctx context.Context, opts options) error {
-	dumpPath := filepath.Join(opts.outDir, opts.dbName+".sql")
-	if _, err := os.Stat(dumpPath); err != nil {
+	dumpPath := filepath.Join(opts.outDir, artifact.DumpFileName(opts.dbName))
+	info, err := os.Stat(dumpPath)
+	if err != nil {
 		if os.IsNotExist(err) {
 			return fmt.Errorf("dump file not found: %s - run 'psqldump dump' first", dumpPath)
 		}
 		return fmt.Errorf("inspect dump file %s: %w", dumpPath, err)
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("dump file is not a regular file: %s", dumpPath)
 	}
 
 	if opts.pgVer == "" {
@@ -190,7 +219,7 @@ func runBuild(ctx context.Context, opts options) error {
 		opts.pgVer = v
 	}
 
-	imageTag := imageTagForDatabase(opts.dbName)
+	imageTag := artifact.ImageTag(opts.dbName)
 
 	if err := docker.PullPostgres(ctx, opts.pgVer); err != nil {
 		return fmt.Errorf("pull postgres: %w", err)
@@ -209,13 +238,13 @@ func runBuild(ctx context.Context, opts options) error {
 }
 
 func runCompose(opts options) error {
-	imageTag := imageTagForDatabase(opts.dbName)
+	imageTag := artifact.ImageTag(opts.dbName)
 	composePath, err := compose.Generate(compose.Config{
 		ImageName:    imageTag,
 		Dockerfile:   docker.DockerfileName,
 		DBName:       opts.dbName,
 		User:         opts.user,
-		Password:     opts.password,
+		Password:     opts.targetPass,
 		ExternalPort: opts.externalPort,
 		OutDir:       opts.outDir,
 	})
@@ -251,7 +280,7 @@ func runAll(ctx context.Context, opts options) error {
 		return fmt.Errorf("dump: %w", err)
 	}
 
-	imageTag := imageTagForDatabase(opts.dbName)
+	imageTag := artifact.ImageTag(opts.dbName)
 	if err := docker.PullPostgres(ctx, opts.pgVer); err != nil {
 		return fmt.Errorf("pull postgres: %w", err)
 	}
@@ -268,7 +297,7 @@ func runAll(ctx context.Context, opts options) error {
 		Dockerfile:   docker.DockerfileName,
 		DBName:       opts.dbName,
 		User:         opts.user,
-		Password:     opts.password,
+		Password:     opts.targetPass,
 		ExternalPort: opts.externalPort,
 		OutDir:       opts.outDir,
 	})
@@ -279,46 +308,6 @@ func runAll(ctx context.Context, opts options) error {
 	fmt.Printf("\nAll done! Portable dump, build recipe, and compose file are at: %s\nRun 'docker compose -f %s up -d --build' to start.\n",
 		opts.outDir, composePath)
 	return nil
-}
-
-func imageTagForDatabase(dbName string) string {
-	lowerName := strings.ToLower(dbName)
-	var slug strings.Builder
-	var pendingSeparator byte
-
-	for _, char := range lowerName {
-		if (char >= 'a' && char <= 'z') || (char >= '0' && char <= '9') {
-			if pendingSeparator != 0 && slug.Len() > 0 {
-				slug.WriteByte(pendingSeparator)
-			}
-			pendingSeparator = 0
-			slug.WriteRune(char)
-			continue
-		}
-
-		separator := byte('-')
-		if char == '-' || char == '_' || char == '.' {
-			separator = byte(char)
-		}
-		if pendingSeparator == 0 {
-			pendingSeparator = separator
-		} else {
-			pendingSeparator = '-'
-		}
-	}
-
-	normalized := slug.String()
-	if normalized == "" {
-		normalized = "database"
-	}
-	if len(normalized) > 160 {
-		normalized = strings.TrimRight(normalized[:160], "-_.")
-	}
-	if normalized != dbName {
-		hash := sha256.Sum256([]byte(dbName))
-		normalized = fmt.Sprintf("%s-%x", normalized, hash[:4])
-	}
-	return "psqldump-" + normalized + ":latest"
 }
 
 func printUsage(w io.Writer) {
@@ -332,6 +321,7 @@ func printUsage(w io.Writer) {
 	_, _ = fmt.Fprintln(w, "  build     Build a Docker image with the dump baked in")
 	_, _ = fmt.Fprintln(w, "  compose   Generate a docker-compose.yml for the restored database")
 	_, _ = fmt.Fprintln(w, "  all       Run dump, build, and compose in sequence")
+	_, _ = fmt.Fprintln(w, "  version   Print the psqldump version")
 	_, _ = fmt.Fprintln(w)
 	_, _ = fmt.Fprintln(w, "Run 'psqldump <command> --help' for command flags.")
 }
@@ -342,7 +332,8 @@ func printCommandUsage(w io.Writer, command string) {
 	_, _ = fmt.Fprintln(w, "  -H, --host string             PostgreSQL host (default \"localhost\")")
 	_, _ = fmt.Fprintln(w, "  -P, --port int                PostgreSQL port (default 5432)")
 	_, _ = fmt.Fprintln(w, "  -U, --user string             PostgreSQL user (default \"postgres\")")
-	_, _ = fmt.Fprintln(w, "  -W, --password string         PostgreSQL password (or set PGPASSWORD)")
+	_, _ = fmt.Fprintln(w, "  -W, --password string         Source PostgreSQL password (or set PGPASSWORD)")
+	_, _ = fmt.Fprintln(w, "      --target-password string  Password for the restored database (or set PSQLDUMP_TARGET_PASSWORD)")
 	_, _ = fmt.Fprintln(w, "  -d, --dbname string           Database name (required)")
 	_, _ = fmt.Fprintln(w, "  -o, --out string              Output directory (default \".\")")
 	_, _ = fmt.Fprintln(w, "  -E, --external-port int       Host port for the generated compose file (default 5432)")

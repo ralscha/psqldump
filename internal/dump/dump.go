@@ -4,11 +4,14 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 
+	"psqldump/internal/artifact"
+	"psqldump/internal/fileutil"
 	"psqldump/internal/postgres"
 )
 
@@ -29,6 +32,10 @@ func ServerVersion(cfg Config) (string, error) {
 }
 
 func ServerVersionContext(ctx context.Context, cfg Config) (string, error) {
+	if err := validateConnectionConfig(cfg); err != nil {
+		return "", err
+	}
+
 	args := []string{
 		"run", "--rm",
 		"-e", "PGPASSWORD",
@@ -72,6 +79,9 @@ func Run(cfg Config) (string, error) {
 }
 
 func RunContext(ctx context.Context, cfg Config) (string, error) {
+	if err := validateConnectionConfig(cfg); err != nil {
+		return "", err
+	}
 	if cfg.OutDir == "" {
 		cfg.OutDir = "."
 	}
@@ -93,10 +103,7 @@ func RunContext(ctx context.Context, cfg Config) (string, error) {
 
 	clientImage := fmt.Sprintf("postgres:%s-alpine", pgVer)
 
-	dumpFileName := cfg.DBName + ".sql"
-	if !filepath.IsLocal(dumpFileName) || filepath.Base(dumpFileName) != dumpFileName {
-		return "", fmt.Errorf("database name %q cannot be used as a portable dump filename", cfg.DBName)
-	}
+	dumpFileName := artifact.DumpFileName(cfg.DBName)
 	dumpPath := filepath.Join(cfg.OutDir, dumpFileName)
 
 	args := []string{
@@ -118,23 +125,42 @@ func RunContext(ctx context.Context, cfg Config) (string, error) {
 	cmd := exec.CommandContext(ctx, "docker", args...)
 	cmd.Env = environmentWithPassword(cfg.Password)
 
-	// #nosec G304 -- dumpPath is constructed from cfg.OutDir and cfg.DBName
-	f, err := os.Create(dumpPath)
-	if err != nil {
-		return "", fmt.Errorf("create dump file: %w", err)
-	}
-	defer func() { _ = f.Close() }()
-
-	cmd.Stdout = f
 	cmd.Stderr = os.Stderr
-
-	if err := cmd.Run(); err != nil {
-		_ = os.Remove(dumpPath)
-		return "", fmt.Errorf("docker pg_dump failed: %w", err)
+	if err := fileutil.WriteAtomic(dumpPath, 0o600, func(output io.Writer) error {
+		cmd.Stdout = output
+		if err := cmd.Run(); err != nil {
+			return fmt.Errorf("docker pg_dump failed: %w", err)
+		}
+		return nil
+	}); err != nil {
+		return "", fmt.Errorf("write dump file: %w", err)
 	}
 
 	fmt.Printf("Dump complete: %s (%d bytes)\n", dumpPath, fileSize(dumpPath))
 	return dumpPath, nil
+}
+
+func validateConnectionConfig(cfg Config) error {
+	if cfg.Host == "" {
+		return fmt.Errorf("PostgreSQL host is required")
+	}
+	if cfg.Port <= 0 || cfg.Port > 65535 {
+		return fmt.Errorf("invalid PostgreSQL port: %d", cfg.Port)
+	}
+	if cfg.User == "" {
+		return fmt.Errorf("PostgreSQL user is required")
+	}
+	if cfg.DBName == "" {
+		return fmt.Errorf("database name is required")
+	}
+	for name, value := range map[string]string{
+		"host": cfg.Host, "user": cfg.User, "database name": cfg.DBName,
+	} {
+		if strings.ContainsRune(value, '\x00') {
+			return fmt.Errorf("%s cannot contain a null byte", name)
+		}
+	}
+	return nil
 }
 
 func environmentWithPassword(password string) []string {

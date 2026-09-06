@@ -32,6 +32,9 @@ Download the latest release for your platform from the [Releases](https://github
 ### Quick start
 
 ```bash
+export PGPASSWORD='source-database-password'
+export PSQLDUMP_TARGET_PASSWORD='choose-a-local-password'
+
 psqldump all \
   --host my-db.example.com \
   --dbname mydatabase \
@@ -39,7 +42,7 @@ psqldump all \
   --out ./out
 ```
 
-Set `PGPASSWORD` in the environment before running the command. `--password` is also supported, but environment variables avoid saving the password in shell history.
+`PGPASSWORD` authenticates to the source server. `PSQLDUMP_TARGET_PASSWORD` sets a separate password for the restored database. Keeping them separate prevents the source credential from being written into the portable Compose bundle. The equivalent `--password` and `--target-password` flags are supported, but environment variables avoid saving passwords in shell history.
 
 This auto-detects the remote PostgreSQL version, dumps the database, builds a Docker image, and generates a `docker-compose.yml`.
 
@@ -52,9 +55,11 @@ psqldump dump -H my-db.example.com -d mydatabase -U postgres -o ./out
 # 2. Build the image and write ./out/psqldump.Dockerfile
 psqldump build -H my-db.example.com -d mydatabase -U postgres -o ./out
 
-# 3. Generate compose file
+# 3. Generate compose file (with PSQLDUMP_TARGET_PASSWORD set)
 psqldump compose -d mydatabase -U postgres -o ./out
 ```
+
+`compose` and `all` require a target password. `dump` and `build` do not. The generated service includes a PostgreSQL readiness healthcheck.
 
 ### Start the restored database
 
@@ -84,7 +89,8 @@ The command line uses Go's built-in `flag` package. Short flags use one dash and
 | `--host` | `-H` | `localhost` | Remote PostgreSQL host |
 | `--port` | `-P` | `5432` | Remote PostgreSQL port |
 | `--user` | `-U` | `postgres` | PostgreSQL user |
-| `--password` | `-W` | `PGPASSWORD` env or empty | PostgreSQL password |
+| `--password` | `-W` | `PGPASSWORD` env or empty | Source PostgreSQL password |
+| `--target-password` | | `PSQLDUMP_TARGET_PASSWORD` env or empty | Password for the restored database; required by `compose` and `all` |
 | `--dbname` | `-d` | required | Database name |
 | `--out` | `-o` | `.` | Output directory for dump and compose file |
 | `--external-port` | `-E` | value of `--port` | Host port in the generated compose file |
@@ -100,6 +106,9 @@ If `--external-port` is omitted, the compose file uses the value from `--port`. 
 | `build` | Build a Docker image and write its portable Dockerfile |
 | `compose` | Generate a portable `docker-compose.yml` |
 | `all` | Run dump, build, and compose in sequence |
+| `version` | Print the installed psqldump version |
+
+Database names that cannot be used directly as portable artifacts or Docker image names (for example, names containing spaces, Unicode, or path separators) are converted to deterministic, collision-resistant artifact names. The original database name is still used when connecting and restoring.
 
 
 ## License
